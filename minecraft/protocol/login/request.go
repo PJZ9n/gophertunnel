@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	legacyjwt "github.com/sandertv/gophertunnel/minecraft/protocol/login/jwt"
 	"gopkg.in/square/go-jose.v2"
 	"gopkg.in/square/go-jose.v2/jwt"
 	"time"
@@ -33,6 +34,9 @@ func init() {
 	data, _ := base64.StdEncoding.DecodeString(mojangPublicKey)
 	publicKey, _ := x509.ParsePKIXPublicKey(data)
 	mojangKey = publicKey.(*ecdsa.PublicKey)
+
+	// By default only allow the ES384 algorithm, as that is the only one that Minecraft will ever use.
+	legacyjwt.AllowAlg("ES384")
 }
 
 // mojangKey holds the parsed Mojang ecdsa.PublicKey.

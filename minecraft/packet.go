@@ -37,6 +37,8 @@ func (p *packetData) decode(conn *Conn) (pk packet.Packet, err error) {
 	if !ok {
 		// No packet with the ID. This may be a custom packet of some sorts.
 		pk = &packet.Unknown{PacketID: p.h.PacketID}
+		//fmt.Printf("%#v", pk)
+		return pk, fmt.Errorf("%w", "Unknown packet") //TODO gophertunnel bugs? invalid memory address or nil pointer dereference
 	}
 	pk = pkFunc()
 

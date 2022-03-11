@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/sandertv/go-raknet"
@@ -14,6 +15,7 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/nbt"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
+	legacyjwt "github.com/sandertv/gophertunnel/minecraft/protocol/login/jwt"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/resource"
 	"github.com/sandertv/gophertunnel/minecraft/text"
@@ -694,42 +696,54 @@ type saltClaims struct {
 // on the client side of the connection, using the hash and the public key from the server exposed in the
 // packet.
 func (conn *Conn) handleServerToClientHandshake(pk *packet.ServerToClientHandshake) error {
-	tok, err := jwt.ParseSigned(string(pk.JWT))
+	headerData, err := legacyjwt.HeaderFrom(pk.JWT)
 	if err != nil {
-		return fmt.Errorf("parse server token: %w", err)
+		return fmt.Errorf("error reading ServerToClientHandshake JWT header: %v", err)
 	}
-	//lint:ignore S1005 Double assignment is done explicitly to prevent panics.
-	raw, _ := tok.Headers[0].ExtraHeaders["x5u"]
-	kStr, _ := raw.(string)
-
-	pub := new(ecdsa.PublicKey)
-	if err := login.ParsePublicKey(kStr, pub); err != nil {
-		return fmt.Errorf("parse server public key: %w", err)
+	header := &legacyjwt.Header{}
+	if err := json.Unmarshal(headerData, header); err != nil {
+		return fmt.Errorf("error parsing ServerToClientHandshake JWT header JSON: %v", err)
 	}
-
-	var c saltClaims
-	if err := tok.Claims(pub, &c); err != nil {
-		return fmt.Errorf("verify claims: %w", err)
+	if !legacyjwt.AllowedAlg(header.Algorithm) {
+		return fmt.Errorf("ServerToClientHandshake JWT header had unexpected alg: expected %v, got %v", "ES384", header.Algorithm)
 	}
-	c.Salt = strings.TrimRight(c.Salt, "=")
-	salt, err := base64.RawStdEncoding.DecodeString(c.Salt)
+	// First parse the public pubKey, so that we can use it to verify the entire JWT afterwards. The JWT is self-
+	// signed by the server.
+	pubKey := &ecdsa.PublicKey{}
+	if err := legacyjwt.ParsePublicKey(header.X5U, pubKey); err != nil {
+		return fmt.Errorf("error parsing ServerToClientHandshake header x5u public pubKey: %v", err)
+	}
+	if _, err := legacyjwt.Verify(pk.JWT, pubKey, false); err != nil {
+		return fmt.Errorf("error verifying ServerToClientHandshake JWT: %v", err)
+	}
+	// We already know the JWT is valid as we verified it, so no need to error check.
+	body, _ := legacyjwt.Payload(pk.JWT)
+	m := make(map[string]string)
+	if err := json.Unmarshal(body, &m); err != nil {
+		return fmt.Errorf("error parsing ServerToClientHandshake JWT payload JSON: %v", err)
+	}
+	b64Salt, ok := m["salt"]
+	if !ok {
+		return fmt.Errorf("ServerToClientHandshake JWT payload contained no 'salt'")
+	}
+	// Some (faulty) JWT implementations use padded base64, whereas it should be raw. We trim this off.
+	b64Salt = strings.TrimRight(b64Salt, "=")
+	salt, err := base64.RawStdEncoding.DecodeString(b64Salt)
 	if err != nil {
 		return fmt.Errorf("error base64 decoding ServerToClientHandshake salt: %v", err)
 	}
 
-	x, _ := pub.Curve.ScalarMult(pub.X, pub.Y, conn.privateKey.D.Bytes())
+	x, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, conn.privateKey.D.Bytes())
 	// Make sure to pad the shared secret up to 96 bytes.
 	sharedSecret := append(bytes.Repeat([]byte{0}, 48-len(x.Bytes())), x.Bytes()...)
-
 	keyBytes := sha256.Sum256(append(salt, sharedSecret...))
 
-	// Finally we enable encryption for the enc and dec using the secret pubKey bytes we produced.
+	// Finally we enable encryption for the encoder and decoder using the secret pubKey bytes we produced.
 	conn.enc.EnableEncryption(keyBytes)
 	conn.dec.EnableEncryption(keyBytes)
 
 	// We write a ClientToServerHandshake packet (which has no payload) as a response.
-	_ = conn.WritePacket(&packet.ClientToServerHandshake{})
-	return nil
+	return conn.WritePacket(&packet.ClientToServerHandshake{})
 }
 
 // handleClientCacheStatus handles a ClientCacheStatus packet sent by the client. It specifies if the client
