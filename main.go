@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/pelletier/go-toml"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
@@ -15,9 +17,49 @@ import (
 // The following program implements a proxy that forwards players from one local address to a remote address.
 func main() {
 	config := readConfig()
-	token, err := auth.RequestLiveToken()
-	if err != nil {
-		panic(err)
+
+	var token *oauth2.Token
+	if _, err := os.Stat("token.json"); err == nil {
+		fmt.Println("Token exists")
+
+		data, err := ioutil.ReadFile("token.json")
+		if err != nil {
+			panic(err)
+		}
+
+		if err := json.Unmarshal(data, &token); err != nil {
+			panic(err)
+		}
+	} else {
+		fmt.Println("Token does not exist")
+
+		token, err = auth.RequestLiveToken()
+		if err != nil {
+			panic(err)
+		}
+
+		data, err := json.Marshal(token)
+		if err != nil {
+			panic(err)
+		}
+
+		file, err := os.Create("token.json")
+		if err != nil {
+			panic(err)
+		}
+		defer func(file *os.File) {
+			err := file.Close()
+			if err != nil {
+				panic(err)
+			}
+		}(file)
+
+		_, err = file.Write(data)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Token saved")
 	}
 	src := auth.RefreshTokenSource(token)
 
